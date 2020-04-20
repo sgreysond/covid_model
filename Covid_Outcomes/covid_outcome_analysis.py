@@ -11,7 +11,7 @@ from typing import NamedTuple
 class CovidParams(NamedTuple):
     """Class to define and specify parameter values"""
 
-    time_horizon: int = 30  # Number of days allowed for cases to resolve
+    time_horizon: int = 60  # Number of days allowed for cases to resolve
     cumulative_mode: bool = True  # Indicator of whether data is cumulative instead of incremental
     epsilon: float = 1e-6  # Small number
 
@@ -23,6 +23,7 @@ class CovidOutcomes:
 
         self.data = input_df
         self.params = params
+        self.time_horizon = self.params.time_horizon
 
         self.validate_input_data()
         self.clean_input()
@@ -32,9 +33,9 @@ class CovidOutcomes:
 
         # self.solution = self.constrained_regress()
         self.raw_solution = opt.nnls(self.constrained_history_matrix, self.right_hand_side, maxiter=100000)[0]
-        self.solution = pd.DataFrame({"days_from_diagnosis": list(range(self.params.time_horizon + 1)),
-                                      "death_probability": self.raw_solution[:self.params.time_horizon + 1],
-                                      "recovery_probability": self.raw_solution[self.params.time_horizon + 1:]})
+        self.solution = pd.DataFrame({"days_from_diagnosis": list(range(self.time_horizon + 1)),
+                                      "death_probability": self.raw_solution[:self.time_horizon + 1],
+                                      "recovery_probability": self.raw_solution[self.time_horizon + 1:]})
 
         print(self.solution)
 
@@ -84,9 +85,15 @@ class CovidOutcomes:
         """Check for any gaps in the date range, and fill them."""
 
         self.start_date = (self.data[self.data["incr_Confirmed"] > 0]["ObservationDate"].min() -
-                           datetime.timedelta(days=self.params.time_horizon)).date()
+                           datetime.timedelta(days=self.time_horizon)).date()
 
         self.end_date = self.data["ObservationDate"].max().date()
+
+        if (self.end_date - self.start_date).days < 2 * self.time_horizon:
+            warnings.warn("Matrix solution may be underconstrained. More data needed for the given time horizon. "
+                          "The time horizon will be shortened as needed.")
+
+            self.time_horizon = int((self.end_date - self.start_date).days / 2) + 3
 
         full_dates = \
             pd.DataFrame({"ObservationDate": [self.start_date + datetime.timedelta(delta) for delta in
@@ -94,12 +101,6 @@ class CovidOutcomes:
         full_dates["ObservationDate"] = pd.to_datetime(full_dates["ObservationDate"])
 
         self.data = full_dates.merge(self.data, on="ObservationDate", how="left").fillna(0)
-
-        if (self.end_date - self.start_date).days < 2 * self.params.time_horizon:
-            warnings.warn("Matrix solution may be underconstrained. More data needed for the given time horizon. "
-                          "The time horizon will be shortened as needed.")
-
-            self.params.time_horizon = int((self.end_date - self.start_date).days / 2)
 
         # Cast dtypes since nulls create floats
         self.data["incr_Confirmed"] = self.data["incr_Confirmed"].astype(int)
@@ -134,8 +135,8 @@ class CovidOutcomes:
     def build_constrained_history_matrix(self):
         """Build the constraint matrix"""
 
-        num_data_rows_per_outcome = (self.end_date - self.start_date).days - self.params.time_horizon + 1
-        half_num_cols = (self.params.time_horizon + 1)
+        num_data_rows_per_outcome = (self.end_date - self.start_date).days - self.time_horizon + 1
+        half_num_cols = (self.time_horizon + 1)
 
         case_vec = self.data["incr_Confirmed"].to_list()
 
@@ -143,11 +144,11 @@ class CovidOutcomes:
 
         # for outcome in [0, 1]:
         for ind in range(num_data_rows_per_outcome):
-            new_case_row = [case_vec[-(ind + delta + 1)] for delta in range(self.params.time_horizon + 1)]
+            new_case_row = [case_vec[-(ind + delta + 1)] for delta in range(self.time_horizon + 1)]
             constraint_matrix[ind] = np.array(new_case_row + half_num_cols*[0])
 
         for ind in range(num_data_rows_per_outcome):
-            new_case_row = [case_vec[-(ind + delta + 1)] for delta in range(self.params.time_horizon + 1)]
+            new_case_row = [case_vec[-(ind + delta + 1)] for delta in range(self.time_horizon + 1)]
             constraint_matrix[num_data_rows_per_outcome + ind] = np.array(half_num_cols*[0] + new_case_row)
 
         constraint_matrix[2 * num_data_rows_per_outcome] = \
@@ -158,14 +159,14 @@ class CovidOutcomes:
     def build_rhs(self):
         """Construct the right-hand-side results."""
 
-        num_data_rows_per_outcome = (self.end_date - self.start_date).days - self.params.time_horizon + 1
+        num_data_rows_per_outcome = (self.end_date - self.start_date).days - self.time_horizon + 1
 
         first_case_date = self.data[self.data["incr_Confirmed"] > 0]["ObservationDate"].min()
         data_from_first_case = self.data[self.data["ObservationDate"] >= first_case_date]
 
         rhs = np.array([data_from_first_case["incr_Deaths"].to_list()[::-1] +
                         data_from_first_case["incr_Recovered"].to_list()[::-1] +
-                        [0.9/self.params.epsilon]], np.float64).reshape([2 * num_data_rows_per_outcome + 1,])
+                        [1/self.params.epsilon]], np.float64).reshape([2 * num_data_rows_per_outcome + 1,])
 
         return rhs
 
