@@ -5,6 +5,8 @@ import pandas as pd
 import numpy as np
 import scipy.optimize as opt
 
+from scipy.special import comb
+
 from typing import NamedTuple
 
 
@@ -14,6 +16,8 @@ class CovidParams(NamedTuple):
     time_horizon: int = 60  # Number of days allowed for cases to resolve
     cumulative_mode: bool = True  # Indicator of whether data is cumulative instead of incremental
     epsilon: float = 1e-6  # Small number
+    order: int = 3  # (n+1)th order differences will be constrained to zero; n>=0; Higher order is less constrained.
+    order = max(order, 0)
 
 
 class CovidOutcomes:
@@ -31,11 +35,15 @@ class CovidOutcomes:
         self.constrained_history_matrix = self.build_constrained_history_matrix()
         self.right_hand_side = self.build_rhs()
 
-        # self.solution = self.constrained_regress()
+
         self.raw_solution = opt.nnls(self.constrained_history_matrix, self.right_hand_side, maxiter=100000)[0]
         self.solution = pd.DataFrame({"days_from_diagnosis": list(range(self.time_horizon + 1)),
                                       "death_probability": self.raw_solution[:self.time_horizon + 1],
                                       "recovery_probability": self.raw_solution[self.time_horizon + 1:]})
+
+        self.solution["cond_death"] = self.solution["death_probability"]/self.solution["death_probability"].sum()
+        self.solution["cond_recover"] = self.solution["recovery_probability"] / \
+                                        self.solution["recovery_probability"].sum()
 
         print(self.solution)
 
@@ -140,7 +148,9 @@ class CovidOutcomes:
 
         case_vec = self.data["incr_Confirmed"].to_list()
 
-        constraint_matrix = np.ndarray(shape=[2 * num_data_rows_per_outcome + 1, 2*half_num_cols], dtype=np.float64)
+        constraint_matrix = np.ndarray(shape=[2 * num_data_rows_per_outcome + 1 +
+                                              2 * half_num_cols - 2*(self.params.order + 1),
+                                              2 * half_num_cols], dtype=np.float64)
 
         # for outcome in [0, 1]:
         for ind in range(num_data_rows_per_outcome):
@@ -151,8 +161,22 @@ class CovidOutcomes:
             new_case_row = [case_vec[-(ind + delta + 1)] for delta in range(self.time_horizon + 1)]
             constraint_matrix[num_data_rows_per_outcome + ind] = np.array(half_num_cols*[0] + new_case_row)
 
-        constraint_matrix[2 * num_data_rows_per_outcome] = \
-            (1/self.params.epsilon) * np.ones(2*half_num_cols).reshape([1, 2*half_num_cols])
+        constraint_matrix[2 * num_data_rows_per_outcome] = (1/self.params.epsilon) * \
+                                                           np.ones(2*half_num_cols).reshape([1, 2*half_num_cols])
+
+        # Add the differencing constraints
+        for ind in range(half_num_cols - (self.params.order + 1)):
+            order_constraint_d = np.zeros(2*half_num_cols).reshape([1, 2*half_num_cols])
+            order_constraint_r = np.zeros(2 * half_num_cols).reshape([1, 2 * half_num_cols])
+            neg_mult = 1
+            for entry in range(ind, ind + self.params.order + 2):
+                order_constraint_d[0][entry] = (neg_mult/self.params.epsilon) * comb(self.params.order + 1, entry - ind, exact=True)
+                order_constraint_r[0][half_num_cols + entry] = (neg_mult / self.params.epsilon) * comb(self.params.order + 1, entry - ind, exact=True)
+                neg_mult *= -1
+
+            constraint_matrix[2 * num_data_rows_per_outcome + 1 + ind] = order_constraint_d
+            constraint_matrix[2 * num_data_rows_per_outcome + 1 + ind + half_num_cols - (self.params.order + 1)] = \
+                order_constraint_r
 
         return constraint_matrix
 
@@ -160,13 +184,16 @@ class CovidOutcomes:
         """Construct the right-hand-side results."""
 
         num_data_rows_per_outcome = (self.end_date - self.start_date).days - self.time_horizon + 1
+        half_num_cols = (self.time_horizon + 1)
 
         first_case_date = self.data[self.data["incr_Confirmed"] > 0]["ObservationDate"].min()
         data_from_first_case = self.data[self.data["ObservationDate"] >= first_case_date]
 
         rhs = np.array([data_from_first_case["incr_Deaths"].to_list()[::-1] +
                         data_from_first_case["incr_Recovered"].to_list()[::-1] +
-                        [1/self.params.epsilon]], np.float64).reshape([2 * num_data_rows_per_outcome + 1,])
+                        [1/self.params.epsilon] + [0]*(2 * half_num_cols - 2*(self.params.order + 1))],
+                       np.float64).reshape([2 * num_data_rows_per_outcome + 1 +
+                                            2 * half_num_cols - 2*(self.params.order + 1),])
 
         return rhs
 
