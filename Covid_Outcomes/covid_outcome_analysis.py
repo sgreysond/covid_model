@@ -35,6 +35,10 @@ class CovidOutcomes:
         self.constrained_history_matrix = self.build_constrained_history_matrix()
         self.right_hand_side = self.build_rhs()
 
+        # Consider scaling to prevent over-emphasis on high-volume days
+        for ind in range(self.num_data_constraints):
+            self.constrained_history_matrix[ind] /= max(self.right_hand_side[ind], 1)
+            self.right_hand_side[ind] = 1.0
 
         self.raw_solution = opt.nnls(self.constrained_history_matrix, self.right_hand_side, maxiter=100000)[0]
         self.solution = pd.DataFrame({"days_from_diagnosis": list(range(self.time_horizon + 1)),
@@ -144,6 +148,7 @@ class CovidOutcomes:
         """Build the constraint matrix"""
 
         num_data_rows_per_outcome = (self.end_date - self.start_date).days - self.time_horizon + 1
+        self.num_data_constraints = 2 * num_data_rows_per_outcome
         half_num_cols = (self.time_horizon + 1)
 
         case_vec = self.data["incr_Confirmed"].to_list()
@@ -200,9 +205,12 @@ class CovidOutcomes:
 
 if __name__ == "__main__":
 
+    # Data obtained from
+    # https://www.kaggle.com/sudalairajkumar/novel-corona-virus-2019-dataset/data?select=covid_19_data.csv
     input_data = pd.read_csv("covid_19_data.csv")
 
     region = "South Korea"
+    # region = "Mainland China"
     province = None
 
     if region is not None:
