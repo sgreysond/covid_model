@@ -35,17 +35,27 @@ class CovidOutcomes:
         self.constrained_history_matrix = self.build_constrained_history_matrix()
         self.right_hand_side = self.build_rhs()
 
-        # Consider scaling to prevent over-emphasis on high-volume days
+        # Considered various types of scaling to prevent over-emphasis on high-volume days,
+        # but encountered too much distortion
         for ind in range(self.num_data_constraints):
-            self.constrained_history_matrix[ind] /= max(self.right_hand_side[ind], 1)
-            self.right_hand_side[ind] = 1.0
+            # if ind < int(self.num_data_constraints / 2):
+            #     divisor = max(
+            #         rhs_copy[ind + int(self.num_data_constraints / 2)], 1)
+            # elif ind < self.num_data_constraints:
+            #     divisor = max(
+            #         rhs_copy[ind - int(self.num_data_constraints / 2)], 1)
+            # else:
+            #     divisor = max(rhs_copy[ind], 1)
+            divisor = 1
+            self.constrained_history_matrix[ind] /= divisor
+            self.right_hand_side[ind] /= divisor
 
         self.raw_solution = opt.nnls(self.constrained_history_matrix, self.right_hand_side, maxiter=100000)[0]
         self.solution = pd.DataFrame({"days_from_diagnosis": list(range(self.time_horizon + 1)),
                                       "death_probability": self.raw_solution[:self.time_horizon + 1],
                                       "recovery_probability": self.raw_solution[self.time_horizon + 1:]})
 
-        self.solution["cond_death"] = self.solution["death_probability"]/self.solution["death_probability"].sum()
+        self.solution["cond_death"] = self.solution["death_probability"] / self.solution["death_probability"].sum()
         self.solution["cond_recover"] = self.solution["recovery_probability"] / \
                                         self.solution["recovery_probability"].sum()
 
@@ -82,7 +92,11 @@ class CovidOutcomes:
     def cumulative_to_incremental(self, col_name):
         """Convert ordered cumulative data into incremental data."""
 
-        self.data["prev_" + col_name] = self.data[col_name].shift(1).fillna(0).astype(int)
+        for _ in range(len(self.data)):
+            # This bridges gaps in cumulative data.
+            self.data["prev_" + col_name] = self.data[col_name].shift(1).fillna(0).astype(int)
+            self.data[col_name] = self.data[[col_name, "prev_" + col_name]].max(axis=1)
+
         self.data["incr_" + col_name] = self.data[col_name] - self.data["prev_" + col_name]
         self.data.drop(columns=["prev_" + col_name, col_name], inplace=True)
 
@@ -154,34 +168,44 @@ class CovidOutcomes:
         case_vec = self.data["incr_Confirmed"].to_list()
 
         constraint_matrix = np.ndarray(shape=[2 * num_data_rows_per_outcome + 1 +
-                                              2 * half_num_cols - 2*(self.params.order + 1),
+                                              2 * half_num_cols - 2 * (self.params.order + 1) + 2,
                                               2 * half_num_cols], dtype=np.float64)
 
         # for outcome in [0, 1]:
         for ind in range(num_data_rows_per_outcome):
             new_case_row = [case_vec[-(ind + delta + 1)] for delta in range(self.time_horizon + 1)]
-            constraint_matrix[ind] = np.array(new_case_row + half_num_cols*[0])
+            constraint_matrix[ind] = np.array(new_case_row + half_num_cols * [0])
 
         for ind in range(num_data_rows_per_outcome):
             new_case_row = [case_vec[-(ind + delta + 1)] for delta in range(self.time_horizon + 1)]
-            constraint_matrix[num_data_rows_per_outcome + ind] = np.array(half_num_cols*[0] + new_case_row)
+            constraint_matrix[num_data_rows_per_outcome + ind] = np.array(half_num_cols * [0] + new_case_row)
 
-        constraint_matrix[2 * num_data_rows_per_outcome] = (1/self.params.epsilon) * \
-                                                           np.ones(2*half_num_cols).reshape([1, 2*half_num_cols])
+        constraint_matrix[2 * num_data_rows_per_outcome] = (1 / self.params.epsilon) * \
+                                                           np.ones(2 * half_num_cols).reshape([1, 2 * half_num_cols])
 
         # Add the differencing constraints
         for ind in range(half_num_cols - (self.params.order + 1)):
-            order_constraint_d = np.zeros(2*half_num_cols).reshape([1, 2*half_num_cols])
+            order_constraint_d = np.zeros(2 * half_num_cols).reshape([1, 2 * half_num_cols])
             order_constraint_r = np.zeros(2 * half_num_cols).reshape([1, 2 * half_num_cols])
             neg_mult = 1
             for entry in range(ind, ind + self.params.order + 2):
-                order_constraint_d[0][entry] = (neg_mult/self.params.epsilon) * comb(self.params.order + 1, entry - ind, exact=True)
-                order_constraint_r[0][half_num_cols + entry] = (neg_mult / self.params.epsilon) * comb(self.params.order + 1, entry - ind, exact=True)
+                order_constraint_d[0][entry] = (neg_mult / self.params.epsilon) * comb(self.params.order + 1,
+                                                                                       entry - ind, exact=True)
+                order_constraint_r[0][half_num_cols + entry] = (neg_mult / self.params.epsilon) * comb(
+                    self.params.order + 1, entry - ind, exact=True)
                 neg_mult *= -1
 
             constraint_matrix[2 * num_data_rows_per_outcome + 1 + ind] = order_constraint_d
             constraint_matrix[2 * num_data_rows_per_outcome + 1 + ind + half_num_cols - (self.params.order + 1)] = \
                 order_constraint_r
+
+        boundary_constraint_d = np.zeros(2 * half_num_cols).reshape([1, 2 * half_num_cols])
+        boundary_constraint_r = np.zeros(2 * half_num_cols).reshape([1, 2 * half_num_cols])
+        boundary_constraint_d[0][half_num_cols - 1] = 1 / self.params.epsilon
+        boundary_constraint_r[0][2 * half_num_cols - 1] = 1 / self.params.epsilon
+
+        constraint_matrix[-2] = boundary_constraint_d
+        constraint_matrix[-1] = boundary_constraint_r
 
         return constraint_matrix
 
@@ -196,9 +220,9 @@ class CovidOutcomes:
 
         rhs = np.array([data_from_first_case["incr_Deaths"].to_list()[::-1] +
                         data_from_first_case["incr_Recovered"].to_list()[::-1] +
-                        [1/self.params.epsilon] + [0]*(2 * half_num_cols - 2*(self.params.order + 1))],
+                        [1 / self.params.epsilon] + [0] * (2 * half_num_cols - 2 * (self.params.order + 1) + 2)],
                        np.float64).reshape([2 * num_data_rows_per_outcome + 1 +
-                                            2 * half_num_cols - 2*(self.params.order + 1),])
+                                            2 * half_num_cols - 2 * (self.params.order + 1) + 2, ])
 
         return rhs
 
@@ -209,8 +233,12 @@ if __name__ == "__main__":
     # https://www.kaggle.com/sudalairajkumar/novel-corona-virus-2019-dataset/data?select=covid_19_data.csv
     input_data = pd.read_csv("covid_19_data.csv")
 
-    region = "South Korea"
-    # region = "Mainland China"
+    # region = "South Korea"
+    region = "Mainland China"
+    # region = "Germany"
+
+    # Note that US data quality, especially for recoveries, is awful.
+    # region = "US"
     province = None
 
     if region is not None:
