@@ -27,7 +27,7 @@ class CovidOutcomes:
 
         self.data = input_df
         self.params = params
-        self.time_horizon = self.params.time_horizon
+        self.time_horizon = self.params.time_horizon + self.params.order + 1
 
         self.validate_input_data()
         self.clean_input()
@@ -58,6 +58,8 @@ class CovidOutcomes:
         self.solution["cond_death"] = self.solution["death_probability"] / self.solution["death_probability"].sum()
         self.solution["cond_recover"] = self.solution["recovery_probability"] / \
                                         self.solution["recovery_probability"].sum()
+
+        self.solution = self.solution[self.solution["days_from_diagnosis"] <= self.params.time_horizon]
 
         print(self.solution)
 
@@ -201,8 +203,11 @@ class CovidOutcomes:
 
         boundary_constraint_d = np.zeros(2 * half_num_cols).reshape([1, 2 * half_num_cols])
         boundary_constraint_r = np.zeros(2 * half_num_cols).reshape([1, 2 * half_num_cols])
-        boundary_constraint_d[0][half_num_cols - 1] = 1 / self.params.epsilon
-        boundary_constraint_r[0][2 * half_num_cols - 1] = 1 / self.params.epsilon
+
+        for ind in range(self.params.order + 1):
+            boundary_constraint_d[0][half_num_cols - (1 + ind)] = 1 / self.params.epsilon
+            boundary_constraint_r[0][2 * half_num_cols - (1 + ind)] = 1 / self.params.epsilon
+
 
         constraint_matrix[-2] = boundary_constraint_d
         constraint_matrix[-1] = boundary_constraint_r
@@ -233,8 +238,8 @@ if __name__ == "__main__":
     # https://www.kaggle.com/sudalairajkumar/novel-corona-virus-2019-dataset/data?select=covid_19_data.csv
     input_data = pd.read_csv("covid_19_data.csv")
 
-    # region = "South Korea"
-    region = "Mainland China"
+    region = "South Korea"
+    # region = "Mainland China"
     # region = "Germany"
 
     # Note that US data quality, especially for recoveries, is awful.
